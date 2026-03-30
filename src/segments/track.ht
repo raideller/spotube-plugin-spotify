@@ -1,10 +1,23 @@
+import 'module:std' as std
 import { SpotifyGqlApi } from '../../dependencies/hetu_spotify_gql_client/lib/assets/hetu/spotify_gql_api_client.ht'
 import { Converters } from '../converter/converter.ht'
+import { SpotifyAuthEndpoint } from './auth.ht'
+
+var HttpClient = std.HttpClient
+var RequestOptions = std.RequestOptions
+
+const spotifyWebClientId = 'd8a5ed958d274c2e8ee717e6a4b0971d'
+const spotifyWebAppVersion = '1.2.87.267.g13b18de3'
+const spotifyWebDeviceId = '0123456789abcdef0123456789abcdef01234567'
 
 class TrackEndpoint {
   var client: SpotifyGqlApi
+  var auth: SpotifyAuthEndpoint
+  var http: HttpClient
 
-  construct (this.client)
+  construct (this.client, this.auth) {
+    http = HttpClient()
+  }
 
   fun getTrack(id: string) {
     return client.track.getTrack(id).then((data) {
@@ -22,22 +35,94 @@ class TrackEndpoint {
     return true
   }
 
-  fun radio(trackId: string) {
-    return client.track.getTrack(trackId).then((data){
-      var query = "${data['name']} Radio"
-      return client.search.playlists(query, limit: 20).then((data) {
-        var playlists = data["items"];
-        var radioPlaylist = playlists.firstWhere((playlist) => playlist["name"] == query, orElse: () => null);
-        return client.playlist.tracks(radioPlaylist["id"], offset: 0, limit: 50)
-          .then((data) {
-            var tracks = data["items"].map((item){
-              item["track"]["available_markets"] = null
-              return item["track"]
-            })
-            .toList()
+  fun requestClientToken() {
+    return http.post(
+      'https://clienttoken.spotify.com/v1/clienttoken',
+      {
+        client_data: {
+          client_version: spotifyWebAppVersion,
+          client_id: spotifyWebClientId,
+          js_sdk_data: {
+            device_brand: 'unknown',
+            device_model: 'unknown',
+            os: 'unknown',
+            os_version: 'unknown',
+            device_id: spotifyWebDeviceId,
+            device_type: 'computer',
+          }.toJson(),
+        }.toJson(),
+      }.toJson(),
+      options: RequestOptions(
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json',
+          'app-platform': 'WebPlayer',
+          'spotify-app-version': spotifyWebAppVersion,
+        }.toJson(),
+      ),
+    ).then((res) {
+      var grantedToken = res.data['granted_token']
+      var token = grantedToken == null ? null : grantedToken['token']
 
-            return Converters.fullTracks(tracks)
-          });
+      if (token == null) {
+        throw 'Failed to get Spotify client token for track radio'
+      }
+
+      return token
+    })
+  }
+
+  fun getRadioPlaylistId(trackId: string) {
+    if (!auth.isAuthenticated()) {
+      throw 'Spotify authentication required for track radio'
+    }
+
+    return requestClientToken().then((clientToken) {
+      return http.get_req(
+        'https://spclient.wg.spotify.com/inspiredby-mix/v2/seed_to_playlist/spotify:track:${trackId}?response-format=json',
+        options: RequestOptions(
+          headers: {
+            'Accept': 'application/json',
+            'authorization': 'Bearer ${auth.credentials["accessToken"]}',
+            'client-token': clientToken,
+            'app-platform': 'WebPlayer',
+            'spotify-app-version': spotifyWebAppVersion,
+          }.toJson(),
+        ),
+      ).then((res) {
+        var mediaItems = res.data['mediaItems'] ?? []
+        var playlistUri = mediaItems.isEmpty ? null : mediaItems.first['uri']
+
+        if (playlistUri == null) {
+          throw 'Spotify did not return a radio playlist for track: ${trackId}'
+        }
+
+        return playlistUri.split(':').last
+      })
+    })
+  }
+
+  fun radio(trackId: string) {
+    return getRadioPlaylistId(trackId).then((playlistId) {
+      return client.playlist.tracks(playlistId, offset: 0, limit: 50).then((data) {
+        var tracks = data['items']
+          .map((item) {
+            if (item == null) {
+              return null
+            }
+
+            if (item['track'] != null) {
+              item['track']['available_markets'] = null
+              return item['track']
+            }
+
+            item['available_markets'] = null
+            return item
+          })
+          .where((item) => item != null)
+          .toList()
+
+        return Converters.fullTracks(tracks)
       })
     })
   }

@@ -37,7 +37,7 @@ class SpotifyMetadataProviderPlugin {
     browse = BrowseEndpoint(api, auth)
     playlist = PlaylistEndpoint(api)
     search = SearchEndpoint(api)
-    track = TrackEndpoint(api)
+    track = TrackEndpoint(api, auth)
     user = UserEndpoint(api)
     core = CorePlugin()
 
