@@ -12,7 +12,6 @@ var HttpResponse = std.HttpResponse
 var RequestOptions = std.RequestOptions
 var Timer = std.Timer
 var JSON = std.JSON
-var Regex = std.Regex
 var LocalStorage = spotube.LocalStorage
 var Webview = spotube.Webview
 var Cookie = spotube.Cookie
@@ -20,6 +19,7 @@ var Cookie = spotube.Cookie
 class SpotifyAuthEndpoint {
   final controller: StreamController
   var _timer: Timer
+  var _authCompleting: bool = false
   /// Map of:
   /// - `cookies`: Map of cookies from <Cookie>.toJson()
   /// - `accessToken`: The access token string
@@ -186,49 +186,66 @@ class SpotifyAuthEndpoint {
 
   fun login(cookies: List) -> Future {
 		return this.credentialsFromCookie(cookies).then((creds){
-      LocalStorage.setString("credentials", JSON.encode(creds.toJson()));
       credentials = creds;
-
-      controller.add({type: "login"}.toJson());
+      return LocalStorage.setString("credentials", JSON.encode(creds.toJson())).then(() {
+        controller.add({type: "login"}.toJson());
+      })
     })
 	}
 
 	fun refreshCredentials() -> Future {
-		if (credentials["cookies"] == null) {
+		if (credentials == null || credentials["cookies"] == null) {
 			print(
 				"[refreshCredentials] No cookie found. Cannot refresh credentials.",
 			);
 			return;
 		}
 		return this.credentialsFromCookie(credentials["cookies"]).then((creds){
-      LocalStorage.setString("credentials", JSON.encode(creds.toJson()));
       credentials = creds;
-      controller.add({ type: "refreshed" }.toJson())
+      return LocalStorage.setString("credentials", JSON.encode(creds.toJson())).then(() {
+        controller.add({ type: "refreshed" }.toJson())
+      })
     })
 	}
 
   fun authenticate() -> Future {
+    _authCompleting = false
     var webview = Webview(uri: "https://accounts.spotify.com/")
 
     var sub: StreamSubscription = webview.onUrlRequestStream.listen((url){
-      var safeUrl = url.endsWith("/") ? url.substring(0, url.length - 1) : url
-      var exp = Regex("https:\\/\\/accounts.spotify.com\\/.+\\/status")
-      if(exp.hasMatch(safeUrl)) {
-        return webview.getCookies(url).then((cookies){
-          return login(cookies.map((cookie)=> cookie.toJson()).toList()).then(() {
-            return webview.close()
-          })
-        })
+      if (_authCompleting) {
+        return
       }
+
+      var safeUrl = url.endsWith("/") ? url.substring(0, url.length - 1) : url
+      return webview.getCookies(url).then((cookies){
+        var cookieMaps = cookies.map((cookie)=> cookie.toJson()).toList()
+        var isSpotifyUrl = safeUrl.contains("spotify.com")
+        var hasSpDc = !cookieMaps.where((cookie)=> cookie["name"] == "sp_dc").toList().isEmpty
+
+        if (!isSpotifyUrl || !hasSpDc) {
+          return
+        }
+
+        _authCompleting = true
+        print("[SpotifyAuth] Completing authentication from URL: ${safeUrl}")
+
+        return login(cookieMaps).then(() {
+          sub.cancel()
+          return webview.close()
+        })
+      })
     })
 
     return webview.open()
   }
 
 	fun logout() {
+		_authCompleting = false;
 		credentials = null;
-		LocalStorage.remove("credentials");
-		controller.add({type: "logout"}.toJson());
+		return LocalStorage.remove("credentials").then(() {
+			controller.add({type: "logout"}.toJson());
+		})
 	}
 }
 
